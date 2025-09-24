@@ -147,8 +147,5 @@ Thumbs.db
 # Build directory
 build/
 
-# Memory/save files
-memory/
-
 # Distribution / packaging
 *.apk
