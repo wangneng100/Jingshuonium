@@ -1,7 +1,7 @@
 import pygame
-import assets
-import definitions
-from base_ui import InventoryUI
+from ..core import assets
+from ..core import definitions
+from .base_ui import InventoryUI
 import math
 
 class ChestUI(InventoryUI):

@@ -1,7 +1,7 @@
 import pygame
-import config
-import assets
-from menu_utils import Button, Slider
+from ..core import config
+from ..core import assets
+from .menu_utils import Button, Slider
 
 class OptionsMenu:
     def __init__(self):

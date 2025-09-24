@@ -1,8 +1,8 @@
 import pygame
 import math
-import config
-import assets
-import definitions
+from ..core import config
+from ..core import assets
+from ..core import definitions
 
 # --- HOTBAR --- 
 class Hotbar:

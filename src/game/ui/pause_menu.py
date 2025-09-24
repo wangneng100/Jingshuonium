@@ -1,7 +1,7 @@
 import pygame
-import config
-import assets
-from menu_utils import Button
+from ..core import config
+from ..core import assets
+from .menu_utils import Button
 
 class PauseMenu:
     def __init__(self):

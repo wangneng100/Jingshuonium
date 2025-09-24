@@ -3,10 +3,10 @@ import sys
 import os
 
 # Add the project root directory to the Python path.
-# This ensures that modules like 'ui' can be found regardless of how the script is run.
+# This ensures that modules like 'src' can be found regardless of how the script is run.
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-import config
+from src.game.core import config
 
 # --- Initialization ---
 # This block must come BEFORE other game module imports (like assets)
@@ -16,20 +16,21 @@ screen = pygame.display.set_mode(tuple(config.WINDOW_SIZE))
 pygame.display.set_caption(config.WINDOW_TITLE)
 clock = pygame.time.Clock()
 
-import assets
-import definitions
+from src.game.core import assets
+from src.game.core import definitions
 import math
 import json
 from perlin_noise import PerlinNoise
 import random
-from inventory import PlayerInventory
-from pause_menu import PauseMenu
-from base_ui import InventoryUI
-from crafting_ui import CraftingUI
-from chest_ui import ChestUI
-from furnace_ui import FurnaceUI
-from hud import Hotbar, HealthBar, TimeDisplay
-from menu_utils import Button
+from src.game.ui.inventory import PlayerInventory
+from src.game.ui.pause_menu import PauseMenu
+from src.game.ui.base_ui import InventoryUI
+from src.game.ui.crafting_ui import CraftingUI
+from src.game.ui.chest_ui import ChestUI
+from src.game.ui.furnace_ui import FurnaceUI
+from src.game.ui.hud import Hotbar, HealthBar, TimeDisplay
+from src.game.ui.menu_utils import Button
+from src.game.entities.player import PlayerController
 
 # --- Placeholder Definitions ---
 # These are added to resolve NameErrors for features that are not yet fully implemented.
@@ -242,6 +243,9 @@ def game_loop(initial_data, save_file_name="world.json"):
 
     while game_state['running']:
         dt = clock.tick(60) / 1000.0
+        # Clamp dt to prevent large jumps that can cause jittering
+        dt = min(dt, 1.0/30.0)  # Limit to minimum 30 FPS equivalent
+        
         mouse_pos, world_mouse_pos = pygame.mouse.get_pos(), pygame.Vector2(pygame.mouse.get_pos()) + game_state['camera_offset']
 
         for event in pygame.event.get():
@@ -276,8 +280,26 @@ def game_loop(initial_data, save_file_name="world.json"):
         if not game_state['paused'] and not game_state['active_ui']:
             nearby_blocks = spatial_grid.get_nearby(player.rect.inflate(assets.BLOCK_SIZE * 2, assets.BLOCK_SIZE * 2))
             player.update(dt, nearby_blocks, game_state['blocks'], game_state['block_entities'], spatial_grid, mouse_pos, hotbar.get_selected_item_type(), world_mouse_pos, game_state['enemies'], game_state['particles'])
-            game_state['camera_offset'].x += (player.rect.centerx - game_state['camera_offset'].x - config.WINDOW_SIZE[0] / 2) * 0.1
-            game_state['camera_offset'].y += (player.rect.centery - game_state['camera_offset'].y - config.WINDOW_SIZE[1] / 2) * 0.1
+            # Improved camera smoothing with pixel alignment to reduce jittering
+            target_x = player.rect.centerx - config.WINDOW_SIZE[0] / 2
+            target_y = player.rect.centery - config.WINDOW_SIZE[1] / 2
+            
+            # 加强防抖动死区 - 只有在玩家真正移动时才移动相机
+            dx = target_x - game_state['camera_offset'].x
+            dy = target_y - game_state['camera_offset'].y
+            
+            # 更严格的死区检测，结合玩家速度信息
+            camera_threshold = 2.0 if abs(player.vel.x) < 0.1 and abs(player.vel.y) < 0.1 else 1.0
+            
+            # 只有在移动足够大且玩家确实在移动时才更新相机
+            if abs(dx) > camera_threshold:
+                game_state['camera_offset'].x += dx * 0.15
+            if abs(dy) > camera_threshold:
+                game_state['camera_offset'].y += dy * 0.15
+            
+            # 强制整数化相机偏移，完全消除亚像素渲染
+            game_state['camera_offset'].x = round(game_state['camera_offset'].x)
+            game_state['camera_offset'].y = round(game_state['camera_offset'].y)
 
         screen.fill(assets.SKY_BLUE)
         visible_blocks = spatial_grid.get_nearby(pygame.Rect(game_state['camera_offset'], config.WINDOW_SIZE))
@@ -1073,606 +1095,6 @@ def generate_chunk(chunk_x, world_type='farm'):
 
     return new_blocks
 
-# --- PLAYER CONTROLLER (2D) ---
-class PlayerController:
-    def __init__(self, pos):
-        self.start_pos = pygame.Vector2(pos)
-        self.pos = pygame.Vector2(pos)
-        self.vel = pygame.Vector2(0, 0)
-        # Make player slightly narrower than a block to avoid getting stuck
-        self.width = assets.BLOCK_SIZE - 2
-        # All entities are 1 block high
-        self.stand_height = assets.BLOCK_SIZE - 4
-        self.crouch_height = config.CROUCH_HEIGHT * assets.BLOCK_SIZE
-        self.height = self.stand_height
-        self.rect = pygame.Rect(self.pos.x, self.pos.y, self.width, self.height)
-        
-        self.grounded = False
-        self.max_health = 10
-        self.health = self.max_health
-        self.is_crouching = False
-        self.jumps_left = config.MAX_JUMPS
-        self.facing = 1 # 1 for right, -1 for left
-        self.is_falling = False
-        self.fall_start_y = 0
-        self.in_water = False
-        self.is_sleeping = False
-        self.rotation_angle = 0
-        self.image = assets.player_texture
-        self.held_item_surface = None
-        self.block_below = None
-        self.is_dying = False
-        self.damage_flash_timer = 0
-        self.damage_flash_duration = 0.3
-
-        # XP and Leveling
-        self.level = 1
-        self.xp = 0
-        self.xp_to_next_level = 100
-        self.death_action = None
-
-        # Skills (for skill_tree_ui.py and saving)
-        self.skill_points = 0
-        self.skills = {}
-
-        # Tool state
-        self.is_tool_active = False
-        self.last_hit_times = {} # {enemy: last_hit_time_ms}
-        self.death_flash_timer = 0
-
-        # New state variables
-        self.diamond_pickaxe_normal_mode = False
-        self.is_staff_charging_throw = False
-        self.staff_is_thrown = False
-        self.place_cooldown = 0.0
-
-        # Held item physics state
-        self.held_item_pos = None
-        self.last_held_item_pos = None
-        self.held_item_vel = pygame.Vector2(0, 0)
-        self.held_item_angle = 0
-        self.held_item_final_surface = None
-
-        # Sling state
-        self.is_charging_sling = False
-        self.sling_charge_time = 0.0
-        self.max_sling_charge_time = 1.5 # seconds
-
-        # Gun state
-        self.gun_cooldown = 0.0
-        self.sniper_cooldown = 0.0
-        # Knockback
-        self.knockback_strength = 300
-        self.knockback_lift = 150
-
-        # Link to inventory for pickup
-        self.inventory = PlayerInventory()
-
-    def get_skill_level(self, skill_id):
-        return self.skills.get(skill_id, 0)
-
-    def add_xp(self, amount):
-        self.xp += amount
-        print(f"Gained {amount} XP! Total: {self.xp}/{self.xp_to_next_level}")
-        while self.xp >= self.xp_to_next_level:
-            self.xp -= self.xp_to_next_level
-            self.level += 1
-            self.skill_points += 1
-            self.xp_to_next_level = int(self.xp_to_next_level * 1.5)
-            print(f"Leveled up to Level {self.level}! You have {self.skill_points} skill points.")
-
-    def set_held_item(self, item_type):
-        if item_type == 'diamond_staff' and self.staff_is_thrown:
-            self.held_item_surface = None
-            return
-
-        if item_type and item_type in assets.textures:
-            item_pixel_size = int(assets.BLOCK_SIZE * config.HELD_ITEM_SIZE)
-
-            if item_type in definitions.ITEM_SCALES:
-                scale = definitions.ITEM_SCALES[item_type]
-                item_pixel_size = int(item_pixel_size * scale)
-
-            base_surface = pygame.transform.scale(assets.textures[item_type], (item_pixel_size, item_pixel_size))
-
-            self.held_item_surface = base_surface
-        else:
-            self.held_item_surface = None
-
-    def crouch(self):
-        if not self.is_crouching:
-            self.is_crouching = True
-            self.pos.y += self.stand_height - self.crouch_height
-            self.height = self.crouch_height
-
-    def jump(self):
-        if self.jumps_left > 0:
-            self.vel.y = -math.sqrt(2 * config.JUMP_HEIGHT * assets.BLOCK_SIZE * config.GRAVITY * config.GRAVITY_MULTIPLIER)
-            self.jumps_left -= 1
-            self.grounded = False
-    def reset_tool_state(self):
-        self.is_tool_active = False # noqa
-        self.last_hit_times.clear()
-
-    def take_damage(self, amount, source=None, source_pos=None, particles_list=None, knockback_vector=None):
-
-        if self.is_dying:
-            return
-
-        # Play damage sound for any damage that isn't self-inflicted continuous damage (like darkness)
-        if source is not self and assets.damage_sound:
-            assets.damage_sound.play()
-
-        # --- Armor Damage Reduction ---
-        if self.inventory and self.inventory.armor_slot:
-            armor_type = self.inventory.armor_slot['type']
-            reduction = definitions.ARMOR_VALUES.get(armor_type, 0.0)
-            amount *= (1.0 - reduction)
-        self.health -= amount
-        self.damage_flash_timer = self.damage_flash_duration
-
-        if knockback_vector:
-            self.vel += pygame.Vector2(knockback_vector) * 0.15
-            self.vel.y -= self.knockback_lift * 0.4
-            self.grounded = False
-        elif source_pos:
-            knockback_dir = self.pos - pygame.Vector2(source_pos)
-            if knockback_dir.length_squared() > 0:
-                knockback_dir.normalize_ip()
-                self.vel += knockback_dir * self.knockback_strength
-                self.vel.y -= self.knockback_lift
-                self.grounded = False
-
-        print(f"Took {amount} damage, {self.health} health remaining.")
-        if self.health <= 0:
-            self.health = 0 # noqa
-            self.die()
-    def respawn(self, difficulty='normal', all_blocks=None, block_entities=None, spatial_grid=None):
-        print("You died!")
-
-        if difficulty == 'darkness':
-            print("You died! Your belongings are lost to the darkness... but you find some gear.")
-            if self.inventory:
-                self.inventory.slots, self.inventory.armor_slot = [None] * 36, None
-                self.inventory.add_item('gun', 1)
-                self.inventory.add_item('stone', 50) # Ammo for the gun
-
-        self.pos.x, self.pos.y = self.start_pos.x, self.start_pos.y
-        self.vel.x, self.vel.y = 0, 0
-        self.is_falling = False
-        self.health = self.max_health
-        self.rect.topleft = self.pos # Immediately sync rect to prevent physics glitches on respawn
-        self.is_dying = False
-        self.rotation_angle = 0
-        self.death_flash_timer = 0
-
-    def die(self):
-        if not self.is_dying:
-            self.is_dying = True
-            self.rotation_angle = 0 # Start rotation from 0
-            self.death_action = 'create_graveyard'
-    def stand(self, nearby_blocks): # noqa
-        if self.is_crouching:
-            # Check for overhead collision before standing
-            test_rect = pygame.Rect(self.rect.x, self.rect.y - (self.stand_height - self.crouch_height), self.width, self.stand_height)
-            if not any(b.is_solid and b.rect.colliderect(test_rect) for b in nearby_blocks):
-                self.is_crouching = False
-                self.pos.y -= self.stand_height - self.crouch_height
-                self.height = self.stand_height # noqa
-    def update(self, dt, nearby_blocks, all_blocks, block_entities, spatial_grid, mouse_pos=None, selected_item_type=None, world_mouse_pos=None, enemies=None, particles_list=None, break_progress=0, difficulty='normal', darkness_multiplier=0): # noqa
-
-        if self.place_cooldown > 0:
-            self.place_cooldown -= dt
-
-        if self.damage_flash_timer > 0:
-            self.damage_flash_timer -= dt
-
-        if self.gun_cooldown > 0:
-            self.gun_cooldown -= dt
-
-        if self.sniper_cooldown > 0:
-            self.sniper_cooldown -= dt
-
-        if self.is_dying:
-            # Death animation: slowly rotate to 90 degrees
-            self.rotation_angle += 225 * dt # 90 degrees in 0.4 seconds
-            self.death_flash_timer = (self.death_flash_timer + dt) % 0.2 # Cycle every 0.2 seconds
-            
-            if self.rotation_angle >= 90: # Death animation finished, respawn regardless of difficulty.
-                self.respawn(difficulty, all_blocks, block_entities, spatial_grid)
-            return # Skip normal update logic
-
-        # --- Water Physics Check ---
-        self.in_water = False
-        player_center_grid_pos = (math.floor(self.rect.centerx / assets.BLOCK_SIZE), math.floor(self.rect.centery / assets.BLOCK_SIZE))
-        block_at_player = next((b for b in nearby_blocks if tuple(b.grid_pos) == player_center_grid_pos and b.type == 'water'), None)
-        if block_at_player:
-            self.in_water = True
-            self.jumps_left = 0 # Can't jump in water
-            self.is_falling = False # Reset fall damage when in water
-
-        keys = pygame.key.get_pressed()
-        
-        # New facing logic: face mouse if holding a tool, otherwise use keys.
-        is_tool_held = selected_item_type and ('sword' in selected_item_type or 'pickaxe' in selected_item_type or 'staff' in selected_item_type or 'sling' in selected_item_type or 'gun' in selected_item_type)
-        if is_tool_held and world_mouse_pos:
-            # Face based on world coordinates of mouse vs player
-            if world_mouse_pos.x > self.rect.centerx:
-                self.facing = 1
-            else:
-                self.facing = -1
-        else:
-            if keys[pygame.K_d]: self.facing = 1
-            if keys[pygame.K_a]: self.facing = -1
-
-        if keys[pygame.K_s]:
-            self.crouch()
-        else:
-            self.stand(nearby_blocks) # Pass nearby blocks here
-
-        # Handle jump rotation animation
-        is_pickaxe_held = selected_item_type and 'pickaxe' in selected_item_type
-        if not self.grounded and not (self.is_tool_active and is_pickaxe_held):
-            self.rotation_angle += config.JUMP_ROTATION_SPEED * dt
-        else:
-            self.rotation_angle = 0
-
-        # Determine which blocks are "effectively solid" for collision this frame
-        effectively_solid_blocks = []
-        for block in nearby_blocks:
-            if block.is_solid or (block.type == 'leaf' and not self.is_crouching):
-                effectively_solid_blocks.append(block)
-        speed = (config.CROUCH_SPEED if self.is_crouching else config.WALK_SPEED)
-        if self.in_water:
-            speed *= 0.5 # Slower in water
-
-        target_vel_x = (keys[pygame.K_d] - keys[pygame.K_a]) * speed * assets.BLOCK_SIZE
-        
-        if self.in_water:
-            friction = config.FRICTION * 2.0 # Water drag
-            
-            # Apply gravity/sinking force
-            water_gravity_multiplier = 0.4
-            if self.is_crouching:
-                water_gravity_multiplier *= 2.0 # Sink 2x faster when crouching
-            self.vel.y += config.GRAVITY * config.GRAVITY_MULTIPLIER * water_gravity_multiplier * assets.BLOCK_SIZE * dt
-
-            # Buoyancy/Swim up
-            if keys[pygame.K_w]:
-                self.vel.y -= 800 * dt
-            # Cap fall speed in water
-            if self.vel.y > 100: self.vel.y = 100 # Increased cap to allow faster sinking
-            self.grounded = False # Can't be grounded in water
-
-            # --- Water Splash Particles ---
-            if abs(self.vel.x) > 20 and random.random() < 0.6 and particles_list is not None: # Chance to spawn splash particles when moving
-                splash_img = pygame.Surface((random.randint(3, 6), random.randint(3, 6)), pygame.SRCALPHA)
-                splash_color = (100, 150, 255, random.randint(150, 200))
-                pygame.draw.circle(splash_img, splash_color, splash_img.get_rect().center, splash_img.get_width() // 2)
-                
-                spawn_pos = (self.rect.centerx + random.uniform(-self.width/2, self.width/2), self.rect.centery)
-                vel = (random.uniform(-20, 20) - self.vel.x * 0.1, random.uniform(-80, -40)) # Upwards splash
-                lifespan = random.uniform(0.4, 0.7)
-                gravity = 250
-                particles_list.append(Particle(spawn_pos, splash_img, vel, gravity, lifespan))
-        else:
-            friction = config.FRICTION if self.grounded else config.AIR_FRICTION
-            self.vel.y += config.GRAVITY * config.GRAVITY_MULTIPLIER * assets.BLOCK_SIZE * dt
-            if self.vel.y > assets.BLOCK_SIZE * 20: self.vel.y = assets.BLOCK_SIZE * 20
-
-        # Handle continuous jumping when 'W' is held on the ground
-        if keys[pygame.K_w] and self.grounded and not self.in_water:
-            self.jump()
-
-        self.vel.x += (target_vel_x - self.vel.x) * friction * dt
-            
-        # --- Collision Detection ---
-        self.rect.width = self.width
-        self.rect.height = self.height
-
-        # X-axis collision
-        self.pos.x += self.vel.x * dt
-        self.rect.x = int(self.pos.x)
-        # Sync rect's y-position before x-collision check. This is crucial because
-        # crouching/standing changes pos.y, and the rect needs the correct vertical
-        # position to avoid false horizontal collisions.
-        self.rect.y = int(self.pos.y)
-
-        for block in effectively_solid_blocks:
-            if block.rect.colliderect(self.rect):
-                if self.vel.x > 0: # Moving right
-                    self.rect.right = block.rect.left
-                elif self.vel.x < 0: # Moving left
-                    self.rect.left = block.rect.right
-                self.pos.x = self.rect.x
-                self.vel.x = 0
-
-        # Y-axis collision
-        self.pos.y += self.vel.y * dt
-        self.rect.y = int(self.pos.y)
-        self.grounded = False
-        self.block_below = None # Reset each frame
-        for block in effectively_solid_blocks:
-            if block.rect.colliderect(self.rect):
-                if self.vel.y > 0: # Moving down
-                    self.rect.bottom = block.rect.top
-                    self.grounded = True
-                    self.block_below = block
-                    self.jumps_left = config.MAX_JUMPS
-                elif self.vel.y < 0: # Moving up
-                    self.rect.top = block.rect.bottom
-                self.pos.y = self.rect.y
-                self.vel.y = 0
-        
-        # --- Held Item Logic & Physics ---
-        self.last_held_item_pos = self.held_item_pos.copy() if self.held_item_pos else None
-        self.held_item_pos = None # Reset each frame
-
-        is_weapon_held = selected_item_type and ('sword' in selected_item_type or 'staff' in selected_item_type)
-        if self.held_item_surface and not self.is_dying:
-            is_staff_held = selected_item_type and 'staff' in selected_item_type
-            is_pickaxe_held = selected_item_type and 'pickaxe' in selected_item_type
-            is_sling_held = selected_item_type == 'sling'
-            is_gun_held = selected_item_type == 'gun'
-
-            # Logic to calculate item position, moved from draw()
-            # Tools like swords and pickaxes follow the mouse.
-            if (is_weapon_held or is_pickaxe_held or is_sling_held or is_gun_held) and world_mouse_pos:
-                player_center = pygame.Vector2(self.rect.center)
-                direction_to_mouse = world_mouse_pos - player_center
-
-                if direction_to_mouse.length() > 0:
-                    rads = math.atan2(-direction_to_mouse.y, direction_to_mouse.x)
-                    degs = math.degrees(rads)
-
-                    orbit_radius = self.rect.width * 0.7
-                    if self.is_charging_sling and is_sling_held:
-                        charge_ratio = min(1.0, self.sling_charge_time / self.max_sling_charge_time)
-                        pull_back_distance = self.rect.width * 0.6 * charge_ratio
-                        orbit_radius -= pull_back_distance
-
-                    offset = direction_to_mouse.normalize() * orbit_radius
-                    self.held_item_pos = player_center + offset
-
-                    # Calculate rotation and final surface
-                    self.held_item_final_surface = self.held_item_surface
-                    if is_staff_held:
-                        staff_length = self.stand_height * 3
-                        original_w, original_h = self.held_item_surface.get_size()
-                        if original_h > 0:
-                            aspect_ratio = original_w / original_h
-                            staff_width = int(staff_length * aspect_ratio)
-                            self.held_item_final_surface = pygame.transform.scale(self.held_item_surface, (staff_width, int(staff_length)))
-                        self.held_item_angle = degs - 45
-                    else:
-                        if self.facing == 1:
-                            self.held_item_angle = degs
-                        else:
-                            self.held_item_final_surface = pygame.transform.flip(self.held_item_surface, True, False)
-                            self.held_item_angle = 180 - degs
-
-                    # Add mining animation for pickaxe
-                    if break_progress > 0 and is_pickaxe_held:
-                        animation_duration = 0.4  # seconds for one swing
-                        animation_time = break_progress % animation_duration
-                        animation_progress_ratio = animation_time / animation_duration
-                        swing_progress = math.sin(animation_progress_ratio * math.pi) # 0->1->0
-                        # A negative angle results in a clockwise swing, which looks correct for mining.
-                        swing_angle = -90
-                        self.held_item_angle += swing_progress * swing_angle
-
-            else: # Default item position
-                item_pos_x = self.rect.centerx
-                item_pos_y = self.rect.top - (self.held_item_surface.get_height() / 2)
-                self.held_item_pos = pygame.Vector2(item_pos_x, item_pos_y)
-                self.held_item_angle = 0
-                self.held_item_final_surface = self.held_item_surface
-                if self.facing == -1:
-                    self.held_item_final_surface = pygame.transform.flip(self.held_item_surface, True, False)
-
-        # Calculate velocity
-        if self.held_item_pos and self.last_held_item_pos and dt > 0:
-            self.held_item_vel = (self.held_item_pos - self.last_held_item_pos) / dt
-        else:
-            self.held_item_vel.x = 0
-            self.held_item_vel.y = 0
-
-        # --- Sword Damage Logic ---
-        if self.is_tool_active and is_weapon_held and self.held_item_pos and enemies and particles_list is not None:
-            velocity_magnitude = self.held_item_vel.length()
-            swing_velocity_threshold = 400 # Still need this to register a swing vs just holding the tool
-
-            if velocity_magnitude > swing_velocity_threshold:
-                # Add swoosh particles
-                if random.random() < 0.8: # Higher chance to spawn trail particles
-                    # Trail length and transparency based on speed
-                    max_velocity_for_scaling = 2000.0
-                    speed_ratio = min(1.0, (velocity_magnitude - swing_velocity_threshold) / (max_velocity_for_scaling - swing_velocity_threshold))
-                    
-                    trail_length = 10 + 40 * speed_ratio
-                    trail_alpha = 80 + 100 * speed_ratio
-                    
-                    swoosh_img = pygame.Surface((trail_length, 4), pygame.SRCALPHA)
-                    swoosh_img.fill((200, 200, 200, trail_alpha)) # Grayish and transparent
-                    angle = math.degrees(math.atan2(-self.held_item_vel.y, self.held_item_vel.x))
-                    swoosh_img = pygame.transform.rotate(swoosh_img, angle)
-
-                    # Calculate direction from player to weapon to offset the particle
-                    player_center = pygame.Vector2(self.rect.center)
-                    direction_from_player = self.held_item_pos - player_center
-                    if direction_from_player.length_squared() > 0:
-                        direction_from_player.normalize_ip()
-                    
-                    # The swoosh is centered on the weapon, but pushed 15px further from the player
-                    base_pos = self.held_item_pos + direction_from_player * 25
-                    spawn_pos = base_pos + self.held_item_vel.normalize() * (-trail_length / 2)
-
-                    particles_list.append(Particle(spawn_pos, swoosh_img, self.held_item_vel * 0.05, 0, 0.15))
-
-                # Get rotated item rect for collision
-                rotated_image = pygame.transform.rotate(self.held_item_final_surface, self.held_item_angle)
-                item_rect = rotated_image.get_rect(center=self.held_item_pos)
-
-                for enemy in enemies:
-                    if enemy.rect.colliderect(item_rect):
-                        ATTACK_SPEED = 0.8 # seconds for full damage charge
-                        current_time_ms = pygame.time.get_ticks()
-                        last_hit_ms = self.last_hit_times.get(enemy, 0)
-                        time_since_last_hit = (current_time_ms - last_hit_ms) / 1000.0
-
-                        # Debounce to prevent one swing from hitting multiple times
-                        if time_since_last_hit > 0.2:
-                            min_hit_interval = ATTACK_SPEED / 5.0
-                            if time_since_last_hit >= min_hit_interval: # noqa
-                                base_damage = definitions.WEAPON_DAMAGE.get(selected_item_type, 0)
-                                damage_ratio = time_since_last_hit / ATTACK_SPEED
-                                damage_multiplier = min(1.0, damage_ratio)**2
-                                damage = base_damage * damage_multiplier
-                                if not self.grounded: damage *= 1.5 # Crit
-                                damage = round(damage, 1)
-
-                                if damage > 0: # noqa
-                                    # Pogo jump logic: if mid-air, get a jump boost and reset double jump. This is now an innate, infinite ability.
-                                    if not self.grounded and not self.is_crouching:
-                                        # If we are falling downwards, the pogo gives a small hop but preserves
-                                        # the fall for damage calculation. Otherwise, it's a full boost.
-                                        if self.is_falling and self.vel.y > 0:
-                                            self.vel.y = -150 # A small, fixed hop to reset jumps without negating the fall.
-                                            # Reset fall height to the enemy's position
-                                            self.fall_start_y = enemy.rect.bottom
-                                        else:
-                                            # A full pogo jump boost if moving upwards or stationary.
-                                            # Formerly based on skill level, now a fixed value equivalent to the old level 2.
-                                            pogo_boost_multiplier = 1.0
-                                            # A full pogo jump is like a new jump, so it should reset any existing fall.
-                                            self.is_falling = False
-                                            self.vel.y = -math.sqrt(2 * config.JUMP_HEIGHT * pogo_boost_multiplier * assets.BLOCK_SIZE * config.GRAVITY * config.GRAVITY_MULTIPLIER)
-                                        self.jumps_left = config.MAX_JUMPS - 1 # Reset double jump
-                                    
-                                    final_knockback_vel = self.held_item_vel.copy()
-                                    # User request: reduce knockback during bullet time (staff charge)
-                                    if self.is_staff_charging_throw:
-                                        final_knockback_vel *= 0.1
-
-                                    if selected_item_type == 'diamond_staff':
-                                        staff_lift_force = 400
-                                        final_knockback_vel.y -= staff_lift_force # Always lift
-                                    
-                                    enemy.take_damage(damage, self, knockback_vector=final_knockback_vel)
-                                    self.last_hit_times[enemy] = current_time_ms # Record this hit
-                                    create_hit_particles(particles_list, enemy.rect.center)
-
-        # --- Diamond Pickaxe Instant Mining ---
-        blocks_to_destroy = []
-        is_diamond_pickaxe_held = selected_item_type == 'diamond_pickaxe'
-        if self.is_tool_active and is_diamond_pickaxe_held and not self.diamond_pickaxe_normal_mode and self.held_item_pos:
-            velocity_magnitude = self.held_item_vel.length()
-            break_velocity_threshold = 500 # Lower threshold for easier use
-
-            if velocity_magnitude > break_velocity_threshold:
-                rotated_image = pygame.transform.rotate(self.held_item_final_surface, self.held_item_angle)
-                item_rect = rotated_image.get_rect(center=self.held_item_pos)
-
-                for block in nearby_blocks: # 'blocks' is nearby_blocks
-                    player_grid_pos = pygame.Vector2(self.rect.centerx / assets.BLOCK_SIZE, self.rect.centery / assets.BLOCK_SIZE)
-                    if block.is_solid and block not in blocks_to_destroy and item_rect.colliderect(block.rect) and player_grid_pos.distance_to(block.grid_pos) <= 4:
-                        
-                        required_level = definitions.BLOCK_MINING_LEVEL.get(block.type, 0)
-                        held_item_tier = definitions.TOOL_TIERS.get(selected_item_type, 0)
-                        
-                        if held_item_tier >= required_level:
-                            blocks_to_destroy.append(block)
-
-        self.handle_fall_damage(particles_list)
-        return blocks_to_destroy
-
-    def handle_fall_damage(self, particles_list):
-        # The death plane is now relative to the player's starting Y position.
-        death_plane_y = self.start_pos.y + 200 * assets.BLOCK_SIZE
-        if self.pos.y > death_plane_y: # Death plane
-            self.die()
-            return
-
-        if not self.grounded and not self.is_falling:
-            # Only start tracking a fall if the player is actually moving downwards.
-            if self.vel.y > 0:
-                self.is_falling = True
-                self.fall_start_y = self.pos.y
-        
-        if self.grounded and self.is_falling:
-            fall_distance = (self.pos.y - self.fall_start_y) / assets.BLOCK_SIZE
-            damage_threshold = config.FALL_DAMAGE_THRESHOLD
-            if fall_distance >= 1.5: # Any fall greater than 1.5 blocks
-                # Spawn dust particles
-                num_dust = min(15, int(fall_distance * 2))
-                if self.block_below and particles_list is not None:
-                    try:
-                        block_texture = assets.textures.get(self.block_below.type, assets.dirt_texture)
-                        dust_color = pygame.transform.average_color(block_texture)
-                        for _ in range(num_dust):
-                            particle_img = pygame.Surface((random.randint(4, 8), random.randint(4, 8)))
-                            particle_img.fill(dust_color)
-                            particle_img.set_alpha(random.randint(100, 150))
-                            spawn_pos = (self.rect.centerx + random.uniform(-self.width/2, self.width/2), self.rect.bottom)
-                            vel = (random.uniform(-50, 50), random.uniform(-80, -20))
-                            lifespan = random.uniform(0.4, 0.8)
-                            particles_list.append(Particle(spawn_pos, particle_img, vel, 100, lifespan))
-                    except: pass
-
-            if fall_distance >= damage_threshold:
-                # Damage is 0.5 (half a heart) for each block fallen past the threshold, rounded to one decimal.
-                damage = round((fall_distance - damage_threshold) * 0.5, 1)
-                self.take_damage(damage, particles_list=particles_list)
-
-                # --- High Fall Particle Effect ---
-                if particles_list is not None:
-                    num_impact_particles = min(25, 5 + int(damage * 5)) # More particles for more damage
-                    if self.block_below:
-                        try:
-                            block_texture = assets.textures.get(self.block_below.type, assets.dirt_texture)
-                            create_explosion_particles(particles_list, self.rect.midbottom, block_texture, num_particles=num_impact_particles)
-                        except: pass
-            self.is_falling = False
-
-    def draw(self, surface, camera_offset, break_progress=0, selected_item_type=None, world_mouse_pos=None):
-        # Draw the player's character model
-        if self.image:
-            base_image = pygame.transform.scale(self.image, (self.rect.width, self.rect.height))
-            if self.facing == -1:
-                base_image = pygame.transform.flip(base_image, True, False)
-            
-            # Apply damage flash if not dying
-            if self.damage_flash_timer > 0 and not self.is_dying:
-                flash_image = base_image.copy()
-                flash_image.fill((255, 100, 100), special_flags=pygame.BLEND_RGB_ADD)
-                base_image = flash_image
-
-            if self.is_dying:
-                # Flash red for 0.1s every 0.2s
-                if self.death_flash_timer < 0.1:
-                    base_image.set_alpha(255)
-                    red_tint = pygame.Surface(base_image.get_size(), pygame.SRCALPHA)
-                    red_tint.fill((255, 0, 0, 100)) # Semi-transparent red
-                    base_image.blit(red_tint, (0,0))
-
-            if not self.grounded or self.is_dying:
-                # Rotate the image for the jump animation, but keep the original hitbox.
-                rotated_player_image = pygame.transform.rotate(base_image, -self.rotation_angle)
-                draw_rect = rotated_player_image.get_rect(center=self.rect.center)
-                surface.blit(rotated_player_image, draw_rect.topleft - camera_offset)
-            else:
-                surface.blit(base_image, self.rect.topleft - camera_offset)
-        else: # Fallback to azure rectangle
-            draw_rect = self.rect.copy()
-            draw_rect.topleft -= camera_offset
-            pygame.draw.rect(surface, assets.AZURE, draw_rect)
-
-        # Draw held item
-        if self.held_item_final_surface and self.held_item_pos and not self.is_dying:
-            rotated_image = pygame.transform.rotate(self.held_item_final_surface, self.held_item_angle)
-            new_rect = rotated_image.get_rect(center=self.held_item_pos)
-            surface.blit(rotated_image, new_rect.topleft - camera_offset)
-
 # --- ENEMY CONTROLLER ---
 class EnemyController:
     def __init__(self, pos, enemy_type='zombie'):
@@ -2424,7 +1846,12 @@ def loading_screen(load_new_world=True, difficulty='normal', save_file_name="wor
 def world_selection_menu():
     pygame.mouse.set_visible(True)
     menu_running = True
+    last_click_time = 0
+    click_cooldown = 300  # 300毫秒冷却时间
+    
     while menu_running:
+        current_time = pygame.time.get_ticks()
+        
         # This menu will show 3 save slots.
         num_slots = 3
         world_buttons = []
@@ -2477,38 +1904,42 @@ def world_selection_menu():
             300, 50, 
             "Back", assets.font, (150, 50, 50), (200, 80, 80)
         )
-
+        
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
                 pygame.quit()
                 sys.exit()
-
-            for i, button in enumerate(world_buttons):
-                if button.handle_event(event):
-                    info = slot_info[i]
-                    if info['exists']:
-                        # Load game
-                        loading_screen(load_new_world=False, save_file_name=info['save_file'])
-                    else:
-                        # Create new world - this needs to go to difficulty selection
-                        difficulty = 'normal' # Default 'idle' difficulty
-                        loading_screen(load_new_world=True, difficulty=difficulty, save_file_name=info['save_file'])
-                    # After game, we come back to main menu, so we can exit this loop.
-                    menu_running = False
-                    return # Return to main menu
             
-            for i, button in enumerate(delete_buttons):
-                if button and button.handle_event(event):
-                    info = slot_info[i]
-                    if info['exists']:
-                        try:
-                            os.remove(info['save_file'])
-                        except OSError as e:
-                            print(f"Error deleting file {info['save_file']}: {e}")
-                        break # Re-draw the menu
-
-            if back_button.handle_event(event):
-                menu_running = False
+            # 使用MOUSEBUTTONUP事件 - 更可靠
+            elif event.type == pygame.MOUSEBUTTONUP and event.button == 1:
+                # 检查冷却时间防止重复触发
+                if current_time - last_click_time > click_cooldown:
+                    mouse_pos = event.pos
+                    
+                    # 检查世界按钮
+                    for i, button in enumerate(world_buttons):
+                        if button.rect.collidepoint(mouse_pos):
+                            last_click_time = current_time
+                            info = slot_info[i]
+                            if info['exists']:
+                                loading_screen(load_new_world=False, save_file_name=info['save_file'])
+                            else:
+                                difficulty = 'normal'
+                                loading_screen(load_new_world=True, difficulty=difficulty, save_file_name=info['save_file'])
+                            menu_running = False
+                            return
+                    
+                    # 检查返回按钮
+                    if back_button.rect.collidepoint(mouse_pos):
+                        last_click_time = current_time
+                        menu_running = False
+            
+            # 处理悬停效果
+            for button in world_buttons + [back_button]:
+                button.handle_event(event)
+            for button in delete_buttons:
+                if button:
+                    button.handle_event(event)
 
         # Drawing
         screen.fill(assets.SKY_BLUE)
@@ -2548,17 +1979,35 @@ def main_menu():
     pygame.mouse.set_visible(True)
 
     menu_running = True
+    last_click_time = 0
+    click_cooldown = 300  # 300毫秒冷却时间
+    
     while menu_running:
+        current_time = pygame.time.get_ticks()
+        mouse_pos = pygame.mouse.get_pos()
+        
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
                 menu_running = False
             
-            if play_button.handle_event(event):
-                world_selection_menu()
-                pygame.mouse.set_visible(True)
+            # 使用MOUSEBUTTONUP事件 - 更可靠
+            elif event.type == pygame.MOUSEBUTTONUP and event.button == 1:
+                # 检查冷却时间防止重复触发
+                if current_time - last_click_time > click_cooldown:
+                    mouse_pos = event.pos
+                    
+                    if play_button.rect.collidepoint(mouse_pos):
+                        last_click_time = current_time
+                        world_selection_menu()
+                        pygame.mouse.set_visible(True)
+                    
+                    elif quit_button.rect.collidepoint(mouse_pos):
+                        last_click_time = current_time
+                        menu_running = False
             
-            if quit_button.handle_event(event):
-                menu_running = False
+            # 处理悬停效果
+            play_button.handle_event(event)
+            quit_button.handle_event(event)
 
         # Drawing
         screen.fill(assets.SKY_BLUE)
@@ -2621,4 +2070,3 @@ if __name__ == '__main__':
         import traceback
         traceback.print_exc()
         input("\nPress Enter to exit.")
-

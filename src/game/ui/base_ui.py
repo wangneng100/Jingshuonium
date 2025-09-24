@@ -1,7 +1,7 @@
 import pygame
-import config
-import assets
-import definitions
+from ..core import config
+from ..core import assets
+from ..core import definitions
 
 class InventoryUI:
     def __init__(self, player_inventory):

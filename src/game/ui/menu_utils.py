@@ -1,5 +1,5 @@
 import pygame
-import assets
+from ..core import assets
 
 class Button:
     def __init__(self, x, y, width, height, text, font, base_color, hover_color):
@@ -13,11 +13,18 @@ class Button:
         self.text_rect = self.text_surf.get_rect(center=self.rect.center)
 
     def handle_event(self, event):
+        # Handle mouse hover for visual feedback
         if event.type == pygame.MOUSEMOTION:
-            self.current_color = self.hover_color if self.rect.collidepoint(event.pos) else self.base_color
-        if event.type == pygame.MOUSEBUTTONDOWN:
-            if event.button == 1 and self.rect.collidepoint(event.pos):
+            if self.rect.collidepoint(event.pos):
+                self.current_color = self.hover_color
+            else:
+                self.current_color = self.base_color
+        
+        # 最简单的点击检测 - 只检测MOUSEBUTTONDOWN
+        if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
+            if self.rect.collidepoint(event.pos):
                 return True
+        
         return False
 
     def draw(self, surface):

@@ -10,15 +10,18 @@ AZURE = (240, 255, 255)
 SKY_BLUE = (135, 206, 235)
 
 # --- Fonts ---
+# Get the project root directory
+project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+font_path = os.path.join(project_root, "assets", "fonts", "quicksand.otf")
+
 try:
-    font_name = "quicksand.otf" # Assumes quicksand.otf is in the same folder
-    font = pygame.font.Font(font_name, 30)
-    small_font = pygame.font.Font(font_name, 18)
-    tiny_font = pygame.font.Font(font_name, 14)
-    scaled_small_font = pygame.font.Font(font_name, int(18 * 1.2))
-    big_font = pygame.font.Font(font_name, 60)
+    font = pygame.font.Font(font_path, 30)
+    small_font = pygame.font.Font(font_path, 18)
+    tiny_font = pygame.font.Font(font_path, 14)
+    scaled_small_font = pygame.font.Font(font_path, int(18 * 1.2))
+    big_font = pygame.font.Font(font_path, 60)
 except FileNotFoundError:
-    print(f"Warning: Font '{font_name}' not found. Falling back to Arial.")
+    print(f"Warning: Font '{font_path}' not found. Falling back to Arial.")
     font = pygame.font.SysFont("Arial", 30)
     small_font = pygame.font.SysFont("Arial", 18)
     tiny_font = pygame.font.SysFont("Arial", 14)
@@ -27,8 +30,8 @@ except FileNotFoundError:
 
 # --- TEXTURE AND SOUND LOADING ---
 BLOCK_SIZE = 32
-TEXTURE_DIR = 'texture'
-SOUND_DIR = 'sound'
+TEXTURE_DIR = os.path.join(project_root, "assets", "textures")
+SOUND_DIR = os.path.join(project_root, "assets", "sounds")
 
 def load_image(filename, alpha=False):
     """Loads an image from the texture directory."""

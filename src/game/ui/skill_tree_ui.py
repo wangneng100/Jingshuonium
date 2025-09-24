@@ -1,8 +1,8 @@
 import pygame
-import config
-import assets
-import definitions
-from menu_utils import Button
+from ..core import config
+from ..core import assets
+from ..core import definitions
+from .menu_utils import Button
 
 class SkillTreeUI:
     def __init__(self, player):

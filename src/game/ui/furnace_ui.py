@@ -1,7 +1,7 @@
 import pygame
-import assets
-import definitions
-from base_ui import InventoryUI
+from ..core import assets
+from ..core import definitions
+from .base_ui import InventoryUI
 
 class FurnaceUI(InventoryUI):
     def __init__(self, player_inventory):
